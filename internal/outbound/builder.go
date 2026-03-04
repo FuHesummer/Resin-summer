@@ -147,6 +147,19 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage, dependencyBundle json
 				return nil, fmt.Errorf("create dependency outbound [%s/%s]: %w", depConfig.Type, depConfig.Tag, err)
 			}
 			depTags = append(depTags, depConfig.Tag)
+
+			// The OutboundManager was never Start()-ed, so Create() skips
+			// lifecycle stages. Run them manually so the dependency outbound
+			// is fully initialised (required for protocols that set up state
+			// during Start, e.g. hysteria2, tuic, wireguard).
+			if depOb, ok := b.outboundMgr.Outbound(depConfig.Tag); ok {
+				for _, stage := range adapter.ListStartStages {
+					if err := adapter.LegacyStart(depOb, stage); err != nil {
+						b.removeDeps(depTags)
+						return nil, fmt.Errorf("dependency outbound start %s [%s/%s]: %w", stage, depConfig.Type, depConfig.Tag, err)
+					}
+				}
+			}
 		}
 	}
 

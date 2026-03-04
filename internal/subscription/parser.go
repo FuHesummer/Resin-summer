@@ -352,6 +352,7 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 			"method":      method,
 			"password":    password,
 		}
+		applyClashDialFields(outbound, proxy)
 		return buildParsedNode(outbound)
 	case "vmess":
 		uuid := strings.TrimSpace(getString(proxy, "uuid"))
@@ -377,6 +378,7 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		}
 		setTLSFromClash(outbound, proxy, "tls")
 		setWSTransportFromClash(outbound, proxy)
+		applyClashDialFields(outbound, proxy)
 		return buildParsedNode(outbound)
 	case "vless":
 		uuid := strings.TrimSpace(getString(proxy, "uuid"))
@@ -395,6 +397,7 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		}
 		setTLSFromClash(outbound, proxy, "tls")
 		setWSTransportFromClash(outbound, proxy)
+		applyClashDialFields(outbound, proxy)
 		return buildParsedNode(outbound)
 	case "trojan":
 		password := strings.TrimSpace(getString(proxy, "password"))
@@ -426,6 +429,7 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 			"tls":         tls,
 		}
 		setWSTransportFromClash(outbound, proxy)
+		applyClashDialFields(outbound, proxy)
 		return buildParsedNode(outbound)
 	case "hysteria2", "hy2":
 		password := strings.TrimSpace(firstNonEmpty(getString(proxy, "password"), getString(proxy, "auth")))
@@ -455,6 +459,7 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 			"password":    password,
 			"tls":         tls,
 		}
+		applyClashDialFields(outbound, proxy)
 		return buildParsedNode(outbound)
 	case "socks", "socks4", "socks4a", "socks5":
 		outbound := map[string]any{
