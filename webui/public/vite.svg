@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Resin icon">
+  <defs>
+    <linearGradient id="resin-drop-gradient" x1="128" y1="12" x2="128" y2="252" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2d318a" />
+      <stop offset="100%" stop-color="#6be6f0" />
+    </linearGradient>
+  </defs>
+  <path
+    fill="url(#resin-drop-gradient)"
+    d="M128 12C88 12 56 44 56 84C56 146 88 198 128 252C168 198 200 146 200 84C200 44 168 12 128 12Z"
+  />
+</svg>

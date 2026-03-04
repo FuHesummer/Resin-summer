@@ -1,0 +1,1 @@
+ALTER TABLE subscriptions ADD COLUMN relay_only BOOLEAN NOT NULL DEFAULT 0;
