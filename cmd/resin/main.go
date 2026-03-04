@@ -280,6 +280,12 @@ func newTopologyRuntime(
 			onNodeRemoved(hash)
 		}
 	})
+	pool.SetOnDependencyBundleChanged(func(hash node.Hash) {
+		log.Printf("[topology] DependencyBundle changed for %s, rebuilding outbound", hash.Hex())
+		outboundMgr.RebuildNodeOutbound(hash)
+		engine.MarkNodeStatic(hash.Hex())
+		probeMgr.TriggerImmediateEgressProbe(hash)
+	})
 	log.Println("ProbeManager initialized")
 
 	scheduler := topology.NewSubscriptionScheduler(topology.SchedulerConfig{

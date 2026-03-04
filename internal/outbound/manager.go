@@ -82,6 +82,49 @@ func (m *OutboundManager) EnsureNodeOutbound(hash node.Hash) {
 	}
 }
 
+// RebuildNodeOutbound unconditionally closes the existing outbound (if any)
+// and builds a new one. Used when DependencyBundle changes for a kept node
+// (e.g. relay group membership changed during subscription refresh).
+func (m *OutboundManager) RebuildNodeOutbound(hash node.Hash) {
+	entry, ok := m.pool.GetEntry(hash)
+	if !ok {
+		return
+	}
+
+	// Close and clear the old outbound so the new build can proceed.
+	old := entry.Outbound.Swap(nil)
+	if old != nil {
+		closeOutbound(*old)
+	}
+
+	// Build a fresh outbound with the current DependencyBundle.
+	ob, err := m.builder.Build(entry.RawOptions, entry.DependencyBundle)
+	if err != nil {
+		entry.SetLastError("outbound rebuild: " + err.Error())
+		return
+	}
+
+	// Verify the entry is still live in the pool.
+	if !m.isLiveEntry(hash, entry) {
+		closeOutbound(ob)
+		return
+	}
+
+	if !entry.Outbound.CompareAndSwap(nil, &ob) {
+		// Another goroutine won the race. Close the losing build result.
+		closeOutbound(ob)
+		return
+	}
+
+	// Close-and-clear if the node disappeared/replaced right after CAS.
+	if !m.isLiveEntry(hash, entry) {
+		swapped := entry.Outbound.Swap(nil)
+		if swapped != nil {
+			closeOutbound(*swapped)
+		}
+	}
+}
+
 // RemoveNodeOutbound clears a node's outbound reference.
 // Accepts the entry directly because the node may already be deleted from the pool
 // (RemoveNodeFromSub deletes before firing onNodeRemoved callback).

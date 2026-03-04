@@ -4,6 +4,7 @@
 package topology
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/netip"
@@ -42,8 +43,9 @@ type GlobalNodePool struct {
 	onSubNodeChanged func(subID string, hash node.Hash, added bool)
 
 	// Health callbacks (optional).
-	onNodeDynamicChanged func(hash node.Hash)                // fired on circuit/failure/egress changes
-	onNodeLatencyChanged func(hash node.Hash, domain string) // fired on latency record updates
+	onNodeDynamicChanged     func(hash node.Hash)                // fired on circuit/failure/egress changes
+	onNodeLatencyChanged     func(hash node.Hash, domain string) // fired on latency record updates
+	onDependencyBundleChanged func(hash node.Hash)               // fired when DependencyBundle changes for an existing node
 
 	// Health config
 	maxLatencyTableEntries int
@@ -61,6 +63,7 @@ type PoolConfig struct {
 	OnSubNodeChanged       func(subID string, hash node.Hash, added bool)
 	OnNodeDynamicChanged   func(hash node.Hash)
 	OnNodeLatencyChanged   func(hash node.Hash, domain string)
+	OnDependencyBundleChanged func(hash node.Hash)
 	MaxLatencyTableEntries int
 	MaxConsecutiveFailures func() int
 	LatencyDecayWindow     func() time.Duration
@@ -82,20 +85,21 @@ func NewGlobalNodePool(cfg PoolConfig) *GlobalNodePool {
 	}
 
 	return &GlobalNodePool{
-		nodes:                  xsync.NewMap[node.Hash, *node.NodeEntry](),
-		subLookup:              cfg.SubLookup,
-		geoLookup:              cfg.GeoLookup,
-		onNodeAdded:            cfg.OnNodeAdded,
-		onNodeRemoved:          cfg.OnNodeRemoved,
-		onSubNodeChanged:       cfg.OnSubNodeChanged,
-		onNodeDynamicChanged:   cfg.OnNodeDynamicChanged,
-		onNodeLatencyChanged:   cfg.OnNodeLatencyChanged,
-		maxLatencyTableEntries: cfg.MaxLatencyTableEntries,
-		maxConsecutiveFailures: maxConsecutiveFailuresFn,
-		latencyDecayWindow:     cfg.LatencyDecayWindow,
-		latencyAuthorities:     cfg.LatencyAuthorities,
-		platformByID:           make(map[string]*platform.Platform),
-		platformByName:         make(map[string]*platform.Platform),
+		nodes:                     xsync.NewMap[node.Hash, *node.NodeEntry](),
+		subLookup:                 cfg.SubLookup,
+		geoLookup:                 cfg.GeoLookup,
+		onNodeAdded:               cfg.OnNodeAdded,
+		onNodeRemoved:             cfg.OnNodeRemoved,
+		onSubNodeChanged:          cfg.OnSubNodeChanged,
+		onNodeDynamicChanged:      cfg.OnNodeDynamicChanged,
+		onNodeLatencyChanged:      cfg.OnNodeLatencyChanged,
+		onDependencyBundleChanged: cfg.OnDependencyBundleChanged,
+		maxLatencyTableEntries:    cfg.MaxLatencyTableEntries,
+		maxConsecutiveFailures:    maxConsecutiveFailuresFn,
+		latencyDecayWindow:        cfg.LatencyDecayWindow,
+		latencyAuthorities:        cfg.LatencyAuthorities,
+		platformByID:              make(map[string]*platform.Platform),
+		platformByName:            make(map[string]*platform.Platform),
 	}
 }
 
@@ -106,6 +110,7 @@ func NewGlobalNodePool(cfg PoolConfig) *GlobalNodePool {
 // depBundle is an optional DependencyBundle (may be nil) for detour/relay chain support.
 func (p *GlobalNodePool) AddNodeFromSub(hash node.Hash, rawOpts json.RawMessage, depBundle json.RawMessage, subID string) {
 	isNew := false
+	depChanged := false
 	p.nodes.Compute(hash, func(entry *node.NodeEntry, loaded bool) (*node.NodeEntry, xsync.ComputeOp) {
 		if !loaded {
 			createdAt := time.Now()
@@ -116,6 +121,9 @@ func (p *GlobalNodePool) AddNodeFromSub(hash node.Hash, rawOpts json.RawMessage,
 		}
 		// Always update DependencyBundle (may change across subscription refreshes).
 		if len(depBundle) > 0 {
+			if !isNew && !bytes.Equal(entry.DependencyBundle, depBundle) {
+				depChanged = true
+			}
 			entry.DependencyBundle = depBundle
 		}
 		entry.AddSubscriptionID(subID)
@@ -124,6 +132,9 @@ func (p *GlobalNodePool) AddNodeFromSub(hash node.Hash, rawOpts json.RawMessage,
 
 	if isNew && p.onNodeAdded != nil {
 		p.onNodeAdded(hash)
+	}
+	if !isNew && depChanged && p.onDependencyBundleChanged != nil {
+		p.onDependencyBundleChanged(hash)
 	}
 	if p.onSubNodeChanged != nil {
 		p.onSubNodeChanged(subID, hash, true)
@@ -460,6 +471,14 @@ func (p *GlobalNodePool) SetOnNodeAdded(fn func(hash node.Hash)) {
 // Must be called before any background workers are started.
 func (p *GlobalNodePool) SetOnNodeRemoved(fn func(hash node.Hash, entry *node.NodeEntry)) {
 	p.onNodeRemoved = fn
+}
+
+// SetOnDependencyBundleChanged sets the callback fired when an existing node's
+// DependencyBundle changes during subscription refresh. Used to trigger outbound
+// rebuild so the node picks up the new relay/detour chain.
+// Must be called before any background workers are started.
+func (p *GlobalNodePool) SetOnDependencyBundleChanged(fn func(hash node.Hash)) {
+	p.onDependencyBundleChanged = fn
 }
 
 // NotifyNodeDirty triggers platform re-evaluation for a single node.
