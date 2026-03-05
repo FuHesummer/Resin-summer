@@ -227,6 +227,125 @@ func TestStubOutboundBuilder_Build(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Relay chain: SS with detour → VLESS dependency bundle
+// ---------------------------------------------------------------------------
+
+func TestSingboxBuilder_RelayChain_SS_Detour_VLESS(t *testing.T) {
+	b, err := NewSingboxBuilder()
+	if err != nil {
+		t.Fatalf("NewSingboxBuilder() error: %v", err)
+	}
+	defer b.Close()
+
+	// Main outbound: Shadowsocks with detour pointing to a VLESS relay tag.
+	ssRaw := json.RawMessage(`{
+		"type": "shadowsocks",
+		"tag":  "ss-landing",
+		"server": "us-shop.example.net",
+		"server_port": 10002,
+		"method": "aes-256-gcm",
+		"password": "test-password",
+		"detour": "relay-vless"
+	}`)
+
+	// Dependency bundle: VLESS relay outbound that the SS detour references.
+	depBundle := json.RawMessage(`{
+		"outbounds": [{
+			"type": "vless",
+			"tag":  "relay-vless",
+			"server": "38.246.237.64",
+			"server_port": 443,
+			"uuid": "00000000-0000-0000-0000-000000000001",
+			"tls": {
+				"enabled": true,
+				"server_name": "example.com",
+				"insecure": true
+			}
+		}]
+	}`)
+
+	ob, err := b.Build(ssRaw, depBundle)
+	if err != nil {
+		t.Fatalf("Build(SS+VLESS relay chain) error: %v", err)
+	}
+	if ob == nil {
+		t.Fatal("Build returned nil outbound")
+	}
+	t.Logf("relay chain outbound type=%s tag=%s", ob.Type(), ob.Tag())
+
+	// With the isolated-manager fix, dependencies are NOT in the shared
+	// outboundMgr. They live in a per-Build isolated manager, which is
+	// correct — it prevents tag collision across nodes.
+
+	// Clean up.
+	if closer, ok := ob.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+// TestSingboxBuilder_RelayChain_SS_Detour_VLESS_WithTransport tests relay chain
+// with VLESS using WebSocket transport (common in real configs).
+func TestSingboxBuilder_RelayChain_SS_Detour_VLESS_WithTransport(t *testing.T) {
+	b, err := NewSingboxBuilder()
+	if err != nil {
+		t.Fatalf("NewSingboxBuilder() error: %v", err)
+	}
+	defer b.Close()
+
+	ssRaw := json.RawMessage(`{
+		"type": "shadowsocks",
+		"tag":  "ss-landing-ws",
+		"server": "us-shop.example.net",
+		"server_port": 10002,
+		"method": "aes-256-gcm",
+		"password": "test-password",
+		"detour": "relay-vless-ws"
+	}`)
+
+	depBundle := json.RawMessage(`{
+		"outbounds": [{
+			"type": "vless",
+			"tag":  "relay-vless-ws",
+			"server": "38.246.237.64",
+			"server_port": 443,
+			"uuid": "00000000-0000-0000-0000-000000000001",
+			"tls": {
+				"enabled": true,
+				"server_name": "example.com",
+				"insecure": true,
+				"utls": {
+					"enabled": true,
+					"fingerprint": "chrome"
+				}
+			},
+			"transport": {
+				"type": "ws",
+				"path": "/ws-path",
+				"headers": {
+					"Host": "example.com"
+				}
+			}
+		}]
+	}`)
+
+	ob, err := b.Build(ssRaw, depBundle)
+	if err != nil {
+		if strings.Contains(err.Error(), "uTLS is not included") {
+			t.Skipf("skipping: %v", err)
+		}
+		t.Fatalf("Build(SS+VLESS-WS relay chain) error: %v", err)
+	}
+	if ob == nil {
+		t.Fatal("Build returned nil outbound")
+	}
+	t.Logf("relay chain WS outbound type=%s tag=%s", ob.Type(), ob.Tag())
+
+	if closer, ok := ob.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+// ---------------------------------------------------------------------------
 // CAS loser close
 // ---------------------------------------------------------------------------
 
