@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*' # Trigger on tags starting with v, e.g., v1.0.0, v1.0.0-rc.1
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.5)'
+        required: true
 
 concurrency:
   group: release-${{ github.ref }}
