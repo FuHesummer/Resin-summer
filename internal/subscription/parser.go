@@ -144,7 +144,7 @@ func parseJSONSubscription(data []byte) ([]ParsedNode, bool, error) {
 			return nodes, true, err
 		}
 		if proxiesRaw, ok := obj["proxies"]; ok {
-			nodes, err := parseClashProxiesJSON(proxiesRaw)
+			nodes, err := parseClashProxiesJSON(proxiesRaw, obj)
 			return nodes, true, err
 		}
 		return nil, false, nil
@@ -189,12 +189,17 @@ func parseRawOutbounds(outbounds []json.RawMessage) []ParsedNode {
 	return nodes
 }
 
-func parseClashProxiesJSON(raw json.RawMessage) ([]ParsedNode, error) {
+func parseClashProxiesJSON(raw json.RawMessage, obj map[string]json.RawMessage) ([]ParsedNode, error) {
 	var proxies []map[string]any
 	if err := json.Unmarshal(raw, &proxies); err != nil {
 		return nil, fmt.Errorf("subscription: unmarshal clash proxies: %w", err)
 	}
-	return parseClashProxies(proxies), nil
+	// Try to parse proxy-groups from the same JSON object for dialer-proxy resolution.
+	var groups []clashGroup
+	if groupsRaw, ok := obj["proxy-groups"]; ok {
+		_ = json.Unmarshal(groupsRaw, &groups) // best-effort
+	}
+	return parseClashProxiesWithDeps(proxies, groups), nil
 }
 
 // clashConfig is the top-level Clash YAML structure with both proxies and proxy-groups.
@@ -420,6 +425,15 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		if insecure, ok := getBool(proxy, "skip-cert-verify", "allowInsecure", "insecure"); ok && insecure {
 			tls["insecure"] = true
 		}
+		if alpn := getStringSlice(proxy, "alpn"); len(alpn) > 0 {
+			tls["alpn"] = alpn
+		}
+		if fingerprint := strings.TrimSpace(getString(proxy, "client-fingerprint", "client_fingerprint")); fingerprint != "" {
+			tls["utls"] = map[string]any{
+				"enabled":     true,
+				"fingerprint": fingerprint,
+			}
+		}
 		outbound := map[string]any{
 			"type":        "trojan",
 			"tag":         defaultTag(tag, "trojan", server, port),
@@ -450,6 +464,12 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		}
 		if alpn := getStringSlice(proxy, "alpn"); len(alpn) > 0 {
 			tls["alpn"] = alpn
+		}
+		if fingerprint := strings.TrimSpace(getString(proxy, "client-fingerprint", "client_fingerprint")); fingerprint != "" {
+			tls["utls"] = map[string]any{
+				"enabled":     true,
+				"fingerprint": fingerprint,
+			}
 		}
 		outbound := map[string]any{
 			"type":        "hysteria2",
@@ -1186,6 +1206,12 @@ func parseVmessURI(uri string) (ParsedNode, bool) {
 		if sni := strings.TrimSpace(firstNonEmpty(getString(v, "sni"), getString(v, "host"))); sni != "" {
 			tls["server_name"] = sni
 		}
+		if fp := strings.TrimSpace(getString(v, "fp")); fp != "" {
+			tls["utls"] = map[string]any{
+				"enabled":     true,
+				"fingerprint": fp,
+			}
+		}
 		outbound["tls"] = tls
 	}
 
@@ -1194,13 +1220,29 @@ func parseVmessURI(uri string) (ParsedNode, bool) {
 		getString(v, "type"),
 		getString(v, "network"),
 	)))
-	if network == "ws" {
+	switch network {
+	case "ws":
 		transport := map[string]any{"type": "ws"}
 		if path := strings.TrimSpace(getString(v, "path")); path != "" {
 			transport["path"] = path
 		}
 		if host := strings.TrimSpace(getString(v, "host")); host != "" {
 			transport["headers"] = map[string]any{"Host": host}
+		}
+		outbound["transport"] = transport
+	case "grpc":
+		transport := map[string]any{"type": "grpc"}
+		if serviceName := strings.TrimSpace(getString(v, "path")); serviceName != "" {
+			transport["service_name"] = serviceName
+		}
+		outbound["transport"] = transport
+	case "h2":
+		transport := map[string]any{"type": "http"}
+		if path := strings.TrimSpace(getString(v, "path")); path != "" {
+			transport["path"] = path
+		}
+		if host := strings.TrimSpace(getString(v, "host")); host != "" {
+			transport["host"] = []string{host}
 		}
 		outbound["transport"] = transport
 	}
@@ -1244,17 +1286,55 @@ func parseVlessURI(uri string) (ParsedNode, bool) {
 		if sni != "" {
 			tls["server_name"] = sni
 		}
+		if insecure := queryBool(query, "allowInsecure", "insecure"); insecure {
+			tls["insecure"] = true
+		}
+		if alpn := splitALPN(query.Get("alpn")); len(alpn) > 0 {
+			tls["alpn"] = alpn
+		}
+		if fp := strings.TrimSpace(query.Get("fp")); fp != "" {
+			tls["utls"] = map[string]any{
+				"enabled":     true,
+				"fingerprint": fp,
+			}
+		}
+		if security == "reality" {
+			reality := map[string]any{"enabled": true}
+			if pbk := strings.TrimSpace(query.Get("pbk")); pbk != "" {
+				reality["public_key"] = pbk
+			}
+			if sid := strings.TrimSpace(query.Get("sid")); sid != "" {
+				reality["short_id"] = sid
+			}
+			tls["reality"] = reality
+		}
 		outbound["tls"] = tls
 	}
 
 	network := strings.ToLower(strings.TrimSpace(firstNonEmpty(query.Get("type"), query.Get("network"))))
-	if network == "ws" {
+	switch network {
+	case "ws":
 		transport := map[string]any{"type": "ws"}
 		if path := strings.TrimSpace(query.Get("path")); path != "" {
 			transport["path"] = path
 		}
 		if host := strings.TrimSpace(query.Get("host")); host != "" {
 			transport["headers"] = map[string]any{"Host": host}
+		}
+		outbound["transport"] = transport
+	case "grpc":
+		transport := map[string]any{"type": "grpc"}
+		if serviceName := strings.TrimSpace(query.Get("serviceName")); serviceName != "" {
+			transport["service_name"] = serviceName
+		}
+		outbound["transport"] = transport
+	case "h2":
+		transport := map[string]any{"type": "http"}
+		if path := strings.TrimSpace(query.Get("path")); path != "" {
+			transport["path"] = path
+		}
+		if host := strings.TrimSpace(query.Get("host")); host != "" {
+			transport["host"] = []string{host}
 		}
 		outbound["transport"] = transport
 	}
@@ -1295,6 +1375,12 @@ func parseTrojanURI(uri string) (ParsedNode, bool) {
 	if insecure {
 		tls["insecure"] = true
 	}
+	if fp := strings.TrimSpace(query.Get("fp")); fp != "" {
+		tls["utls"] = map[string]any{
+			"enabled":     true,
+			"fingerprint": fp,
+		}
+	}
 
 	outbound := map[string]any{
 		"type":        "trojan",
@@ -1306,13 +1392,29 @@ func parseTrojanURI(uri string) (ParsedNode, bool) {
 	}
 
 	network := strings.ToLower(strings.TrimSpace(firstNonEmpty(query.Get("type"), query.Get("network"))))
-	if network == "ws" {
+	switch network {
+	case "ws":
 		transport := map[string]any{"type": "ws"}
 		if path := strings.TrimSpace(query.Get("path")); path != "" {
 			transport["path"] = path
 		}
 		if host := strings.TrimSpace(query.Get("host")); host != "" {
 			transport["headers"] = map[string]any{"Host": host}
+		}
+		outbound["transport"] = transport
+	case "grpc":
+		transport := map[string]any{"type": "grpc"}
+		if serviceName := strings.TrimSpace(query.Get("serviceName")); serviceName != "" {
+			transport["service_name"] = serviceName
+		}
+		outbound["transport"] = transport
+	case "h2":
+		transport := map[string]any{"type": "http"}
+		if path := strings.TrimSpace(query.Get("path")); path != "" {
+			transport["path"] = path
+		}
+		if host := strings.TrimSpace(query.Get("host")); host != "" {
+			transport["host"] = []string{host}
 		}
 		outbound["transport"] = transport
 	}
@@ -1576,7 +1678,9 @@ func looksLikeClashYAML(text string) bool {
 
 func setTLSFromClash(outbound map[string]any, proxy map[string]any, key string) {
 	enabled, ok := getBool(proxy, key)
-	if !ok || !enabled {
+	// Also enable TLS if reality-opts is present (Reality implies TLS).
+	realityOpts, hasReality := getMap(proxy, "reality-opts", "reality_opts")
+	if (!ok || !enabled) && !hasReality {
 		return
 	}
 	tls := map[string]any{"enabled": true}
@@ -1590,23 +1694,63 @@ func setTLSFromClash(outbound map[string]any, proxy map[string]any, key string) 
 	if insecure, ok := getBool(proxy, "skip-cert-verify", "insecure", "allowInsecure"); ok && insecure {
 		tls["insecure"] = true
 	}
+	if alpn := getStringSlice(proxy, "alpn"); len(alpn) > 0 {
+		tls["alpn"] = alpn
+	}
+	if fingerprint := strings.TrimSpace(getString(proxy, "client-fingerprint", "client_fingerprint")); fingerprint != "" {
+		tls["utls"] = map[string]any{
+			"enabled":     true,
+			"fingerprint": fingerprint,
+		}
+	}
+	// Reality TLS support.
+	if hasReality {
+		reality := map[string]any{"enabled": true}
+		if pubKey := strings.TrimSpace(getString(realityOpts, "public-key", "public_key")); pubKey != "" {
+			reality["public_key"] = pubKey
+		}
+		if shortID := strings.TrimSpace(getString(realityOpts, "short-id", "short_id")); shortID != "" {
+			reality["short_id"] = shortID
+		}
+		tls["reality"] = reality
+	}
 	outbound["tls"] = tls
 }
 
 func setWSTransportFromClash(outbound map[string]any, proxy map[string]any) {
-	if strings.ToLower(strings.TrimSpace(getString(proxy, "network"))) != "ws" {
-		return
-	}
-	transport := map[string]any{"type": "ws"}
-	if wsOpts, ok := getMap(proxy, "ws-opts", "ws_opts"); ok {
-		if path := strings.TrimSpace(getString(wsOpts, "path")); path != "" {
-			transport["path"] = path
+	network := strings.ToLower(strings.TrimSpace(getString(proxy, "network")))
+	switch network {
+	case "ws":
+		transport := map[string]any{"type": "ws"}
+		if wsOpts, ok := getMap(proxy, "ws-opts", "ws_opts"); ok {
+			if path := strings.TrimSpace(getString(wsOpts, "path")); path != "" {
+				transport["path"] = path
+			}
+			if headers, ok := getMap(wsOpts, "headers"); ok && len(headers) > 0 {
+				transport["headers"] = headers
+			}
 		}
-		if headers, ok := getMap(wsOpts, "headers"); ok && len(headers) > 0 {
-			transport["headers"] = headers
+		outbound["transport"] = transport
+	case "grpc":
+		transport := map[string]any{"type": "grpc"}
+		if grpcOpts, ok := getMap(proxy, "grpc-opts", "grpc_opts"); ok {
+			if serviceName := strings.TrimSpace(getString(grpcOpts, "grpc-service-name", "grpc_service_name")); serviceName != "" {
+				transport["service_name"] = serviceName
+			}
 		}
+		outbound["transport"] = transport
+	case "h2":
+		transport := map[string]any{"type": "http"}
+		if h2Opts, ok := getMap(proxy, "h2-opts", "h2_opts"); ok {
+			if path := strings.TrimSpace(getString(h2Opts, "path")); path != "" {
+				transport["path"] = path
+			}
+			if hosts := getStringSlice(h2Opts, "host"); len(hosts) > 0 {
+				transport["host"] = hosts
+			}
+		}
+		outbound["transport"] = transport
 	}
-	outbound["transport"] = transport
 }
 
 func buildParsedNode(outbound map[string]any) (ParsedNode, bool) {

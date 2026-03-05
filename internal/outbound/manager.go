@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"time"
 
 	"github.com/Resinat/Resin/internal/netutil"
@@ -56,6 +57,7 @@ func (m *OutboundManager) EnsureNodeOutbound(hash node.Hash) {
 
 	ob, err := m.builder.Build(entry.RawOptions, entry.DependencyBundle)
 	if err != nil {
+		log.Printf("[outbound] build failed for %x: %v", hash, err)
 		entry.SetLastError("outbound build: " + err.Error())
 		return
 	}
@@ -100,6 +102,7 @@ func (m *OutboundManager) RebuildNodeOutbound(hash node.Hash) {
 	// Build a fresh outbound with the current DependencyBundle.
 	ob, err := m.builder.Build(entry.RawOptions, entry.DependencyBundle)
 	if err != nil {
+		log.Printf("[outbound] rebuild failed for %x: %v", hash, err)
 		entry.SetLastError("outbound rebuild: " + err.Error())
 		return
 	}
