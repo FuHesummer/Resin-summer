@@ -420,6 +420,17 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bidirectional tunnel — no HTTP error responses after this point.
+	// Trigger early handshake for lazy/early conns before concurrent copy.
+	clientToUpstreamReader, earlyErr := performEarlyHandshake(clientConn, clientToUpstream, upstreamConn)
+	if earlyErr != nil {
+		upstreamConn.Close()
+		clientConn.Close()
+		lifecycle.setProxyError(ErrUpstreamRequestFailed)
+		lifecycle.setUpstreamError("connect_early_handshake", earlyErr)
+		recordConnectResult(false)
+		return
+	}
+
 	type copyResult struct {
 		n   int64
 		err error
@@ -428,7 +439,7 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer upstreamConn.Close()
 		defer clientConn.Close()
-		n, copyErr := io.Copy(upstreamConn, clientToUpstream)
+		n, copyErr := io.Copy(upstreamConn, clientToUpstreamReader)
 		egressBytesCh <- copyResult{n: n, err: copyErr}
 	}()
 	ingressBytes, ingressCopyErr := io.Copy(clientConn, upstreamConn)

@@ -84,11 +84,18 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage, dependencyBundle json
 
 	outbounds = append(outbounds, mainConfig)
 
-	// Create a Box with all outbounds (no inbounds needed).
+	// Create a Box with all outbounds.
+	// Route.Final must point to the main outbound so that internal DNS queries
+	// and any other unmatched traffic route through the proxy chain instead of
+	// falling back to the auto-created "direct" outbound. Without this, domain-
+	// based server addresses may be resolved via direct DNS (subject to pollution).
 	instance, err := box.New(box.Options{
 		Context: ctx,
 		Options: option.Options{
 			Outbounds: outbounds,
+			Route: &option.RouteOptions{
+				Final: mainConfig.Tag,
+			},
 		},
 	})
 	if err != nil {

@@ -143,7 +143,21 @@ func (s *Socks5Server) HandleConn(conn net.Conn) {
 	// --- Phase 4: send success reply ---
 	s.writeReply(conn, socks5RepSuccess)
 
-	// --- Phase 5: bidirectional tunnel ---
+	// --- Phase 5: early handshake for lazy/early conns ---
+	// sing-box outbounds (SS, VLESS, etc.) return "early conns" that defer
+	// protocol headers until the first Write(). We must trigger the handshake
+	// before starting concurrent bidirectional copy, otherwise the Read side
+	// may race ahead of Write and fail (no server response because no request
+	// was sent yet).
+	clientReader, earlyErr := performEarlyHandshake(conn, conn, upstreamConn)
+	if earlyErr != nil {
+		lifecycle.setProxyError(ErrUpstreamRequestFailed)
+		lifecycle.setUpstreamError("socks5_early_handshake", earlyErr)
+		go s.health.RecordResult(nodeHash, false)
+		return
+	}
+
+	// --- Phase 6: bidirectional tunnel ---
 	recordResult := func(ok bool) {
 		lifecycle.setNetOK(ok)
 		go s.health.RecordResult(nodeHash, ok)
@@ -157,7 +171,7 @@ func (s *Socks5Server) HandleConn(conn net.Conn) {
 	go func() {
 		defer upstreamConn.Close()
 		defer conn.Close()
-		n, copyErr := io.Copy(upstreamConn, conn)
+		n, copyErr := io.Copy(upstreamConn, clientReader)
 		egressBytesCh <- copyResult{n: n, err: copyErr}
 	}()
 	ingressBytes, ingressCopyErr := io.Copy(conn, upstreamConn)
