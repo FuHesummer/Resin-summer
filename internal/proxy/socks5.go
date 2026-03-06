@@ -112,19 +112,66 @@ func (s *Socks5Server) HandleConn(conn net.Conn) {
 	// Clear handshake deadline before dialing upstream (upstream has its own timeout).
 	_ = conn.SetDeadline(time.Time{})
 
-	rawConn, dialErr := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
+	// --- Phase 3.5: SNI-based target rewrite for IP-only SOCKS5 clients ---
+	// When the client uses socks5:// (not socks5h://), it resolves DNS locally
+	// and sends a raw IP address. The upstream outbound receives the IP and
+	// forwards it to the exit node, but the exit node may need a domain name
+	// (e.g. for TLS SNI, virtual hosting, or proper DNS at the exit).
+	//
+	// To fix this, we send the SOCKS5 success reply first (so the client
+	// proceeds with TLS), peek the TLS ClientHello, extract the SNI domain,
+	// and use that domain (with the original port) as the upstream dial target.
+	// The peeked bytes are then replayed to the tunnel.
+	dialTarget := target
+	var peekedClientData []byte
+	host, port, _ := net.SplitHostPort(target)
+	targetIsIP := net.ParseIP(host) != nil
+
+	if targetIsIP {
+		// Send success reply early so the client starts TLS handshake.
+		s.writeReply(conn, socks5RepSuccess)
+
+		// Peek the first chunk from the client (expected: TLS ClientHello).
+		peekBuf := make([]byte, 16384)
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, peekErr := conn.Read(peekBuf)
+		_ = conn.SetReadDeadline(time.Time{})
+
+		if n > 0 {
+			peekedClientData = peekBuf[:n]
+			if sni, ok := extractSNI(peekedClientData); ok {
+				dialTarget = net.JoinHostPort(sni, port)
+				// Update lifecycle/domain for logging.
+				lifecycle.log.TargetHost = dialTarget
+				domain = netutil.ExtractDomain(dialTarget)
+			}
+		}
+		if peekErr != nil && n == 0 {
+			// No data from client at all — cannot proceed.
+			lifecycle.setProxyError(ErrUpstreamRequestFailed)
+			lifecycle.setUpstreamError("socks5_sni_peek", peekErr)
+			go s.health.RecordResult(nodeHash, false)
+			return
+		}
+	}
+
+	rawConn, dialErr := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(dialTarget))
 	if dialErr != nil {
 		proxyErr := classifyConnectError(dialErr)
 		if proxyErr == nil {
 			// context.Canceled — benign client disconnect.
 			lifecycle.setNetOK(true)
-			s.writeReply(conn, socks5RepGeneralFail)
+			if !targetIsIP {
+				s.writeReply(conn, socks5RepGeneralFail)
+			}
 			return
 		}
 		lifecycle.setProxyError(proxyErr)
 		lifecycle.setUpstreamError("socks5_dial", dialErr)
 		go s.health.RecordResult(nodeHash, false)
-		s.writeReply(conn, socks5RepHostUnreach)
+		if !targetIsIP {
+			s.writeReply(conn, socks5RepHostUnreach)
+		}
 		return
 	}
 
@@ -140,8 +187,10 @@ func (s *Socks5Server) HandleConn(conn net.Conn) {
 		s.health.RecordLatency(nodeHash, domain, &latency)
 	})
 
-	// --- Phase 4: send success reply ---
-	s.writeReply(conn, socks5RepSuccess)
+	// --- Phase 4: send success reply (if not already sent for SNI peek) ---
+	if !targetIsIP {
+		s.writeReply(conn, socks5RepSuccess)
+	}
 
 	// --- Phase 5: early handshake for lazy/early conns ---
 	// sing-box outbounds (SS, VLESS, etc.) return "early conns" that defer
@@ -149,12 +198,28 @@ func (s *Socks5Server) HandleConn(conn net.Conn) {
 	// before starting concurrent bidirectional copy, otherwise the Read side
 	// may race ahead of Write and fail (no server response because no request
 	// was sent yet).
-	clientReader, earlyErr := performEarlyHandshake(conn, conn, upstreamConn)
-	if earlyErr != nil {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setUpstreamError("socks5_early_handshake", earlyErr)
-		go s.health.RecordResult(nodeHash, false)
-		return
+	//
+	// If we already peeked client data (SNI rewrite path), replay it to
+	// upstream first — this serves as the early handshake trigger.
+	var clientReader io.Reader = conn
+	if len(peekedClientData) > 0 {
+		// Write the peeked ClientHello to upstream.
+		if _, writeErr := upstreamConn.Write(peekedClientData); writeErr != nil {
+			lifecycle.setProxyError(ErrUpstreamRequestFailed)
+			lifecycle.setUpstreamError("socks5_sni_replay", writeErr)
+			go s.health.RecordResult(nodeHash, false)
+			return
+		}
+		// Skip the normal early handshake — we've already triggered it.
+	} else {
+		var earlyErr error
+		clientReader, earlyErr = performEarlyHandshake(conn, conn, upstreamConn)
+		if earlyErr != nil {
+			lifecycle.setProxyError(ErrUpstreamRequestFailed)
+			lifecycle.setUpstreamError("socks5_early_handshake", earlyErr)
+			go s.health.RecordResult(nodeHash, false)
+			return
+		}
 	}
 
 	// --- Phase 6: bidirectional tunnel ---
